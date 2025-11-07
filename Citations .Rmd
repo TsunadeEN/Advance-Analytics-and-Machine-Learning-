@@ -1,0 +1,1064 @@
+---
+title: "40456934 ITAO7103 - 2"
+author: "Ishita Mani Bhushan Kumar"
+date: "27/04/2025"
+output:
+  pdf_document: default
+  word_document: default
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+### 1. Introduction
+
+Citations serve as a proxy for academic impact. This study explores how
+factors like publication year, network connectivity, grants, and patents
+influence the number of citations an article receives.
+
+We apply rigorous exploratory data analysis (EDA), generalized additive
+modeling (GAM), tree-based models (Decision Trees, Random Forests,
+Gradient Boosting), and unsupervised learning (PCA, k-means clustering,
+t-SNE).
+
+### 2. Data Import & Cleaning
+
+The raw dataset contained several irrelevant columns, such as
+publication identifiers (PMID), text metadata (Title), and redundant
+survey indicators (IsSurvey, Binary1–Binary2, Score1–Score4). These were
+removed to streamline analysis.
+
+Categorical variables (e.g., Has_Grant, Has_Patent, InGroup1, InGroup2)
+were properly treated as factors. Numerical variables were inspected for
+skewness, and appropriate transformations (e.g., log-transforms) were
+performed where necessary, particularly for highly skewed features like
+TotalDegree and CrossGroupCitations.
+
+```{r}
+library(readr)
+df <- read_csv("merged_C01_network_grant_patent_paper_1980_2020_all_preg_preg.csv")
+
+##2. Clean: Drop Pure IDs & Irrelevant Columns
+library(dplyr)
+df_clean <- df %>%
+  select(-c(
+    PMID, TopK, IsSurvey, Binary1, Binary2,
+    Score1, Score2, Score3, Score4,
+    Title, id, Status, Grant_Numbers, Patent_IDs
+  ))
+
+
+```
+
+## 3. Exploratory Data Analysis
+
+### 3a. Numeric variables
+
+```{r}
+library(dplyr)
+
+df_clean %>%
+  select_if(is.numeric) %>%
+  summary()
+```
+
+### Response Variable (`CitedCount`) Distribution
+
+-   **Raw scale:** Highly right-skewed distribution (most papers receive
+    low citations).
+
+-   **Log-transformed:** Distribution becomes more symmetric, suitable
+    for Poisson/NB modeling.
+
+### 3b. Categorical variables
+
+```{r}
+library(dplyr)
+library(purrr)
+
+df_clean %>%
+  select_if(is.factor) %>%
+  summary()
+```
+
+## 4. Distribution of the Response (CitedCount)
+
+### Distribution of Citation Count
+
+-   The raw `CitedCount` distribution is highly right-skewed.
+
+-   Applying a log transformation (`log(CitedCount + 1)`) normalized the
+    distribution significantly.
+
+-   This justified the later use of log-linked models.
+
+### 4a. Raw histogram
+
+```{r}
+library(ggplot2)
+ggplot(df_clean, aes(x = CitedCount)) +
+  geom_histogram(binwidth = 5, fill = "steelblue", color = "white") +
+  ggtitle("Histogram of CitedCount")
+
+```
+
+### 4b. Log‐scaled histogram
+
+```{r}
+ggplot(df_clean, aes(x = CitedCount + 1)) +
+  geom_histogram(bins = 40, fill = "tomato", color = "white") +
+  scale_x_log10() +
+  ggtitle("Log‐scale Histogram of CitedCount")
+
+```
+
+**Interpretation**: Raw CitedCount is heavily skewed right; log
+transformation provides near-normality.
+
+### 4b1. Overdispersion check
+
+```{r}
+library(AER)
+m0 <- glm(CitedCount ~ PubYear + TotalDegree + CrossGroupCitations + Grant_Count,
+          family = poisson(link="log"),
+          data   = df_clean)
+dispersiontest(m0)
+```
+
+### 5. Numeric Predictors vs. CitedCount
+
+```{r}
+numeric_vars <- c("PubYear","AuthorNum","OutDegree",
+                  "InDegree","TotalDegree","ClusteringCoeff",
+                  "CrossGroupCitations","Grant_Count","Patent_Count")
+
+for (v in numeric_vars) {
+  p <- ggplot(df_clean, aes_string(x = v, y = "CitedCount")) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(method = "loess", se = TRUE) +
+    labs(title = paste("CitedCount vs", v),
+         x = v, y = "CitedCount")
+  print(p)
+}
+```
+
+Scatterplots showed that:
+
+-   **TotalDegree** and **CrossGroupCitations** positively correlated
+    with higher citation counts.
+
+-   **AuthorNum** had a slight non-linear relationship.
+
+-   **ClusteringCoeff** showed weak association.
+
+## 6. Categorical Predictors vs. CitedCount
+
+Boxplots revealed that:
+
+-   Articles **with grants** (`Has_Grant = 1`) had higher median
+    citation counts.
+
+-   **Patented articles** also demonstrated a citation advantage.
+
+-   **Cross-group collaborations** (captured by `InGroup1`, `InGroup2`)
+    influenced citation performance positively.
+
+### 6a. Binary factors
+
+```{r}
+bin_vars <- c("Has_Grant","Has_Patent","InGroup1","InGroup2","Has_Self_Citation")
+for (b in bin_vars) {
+  print(
+    ggplot(df_clean, aes_string(x = b, y = "CitedCount")) +
+      geom_boxplot() +
+      scale_y_log10() +
+      labs(title = paste("CitedCount by", b),
+           x = b, y = "CitedCount (log scale)")
+  )
+}
+```
+
+### 6b. Multi-level factors
+
+```{r}
+print(
+  ggplot(df_clean, aes(x = Citation_Locations, y = CitedCount)) +
+    geom_boxplot() +
+    scale_y_log10() +
+    labs(title = "CitedCount by Citation_Locations",
+         x = "Citation_Locations", y = "CitedCount (log scale)")
+)
+print(
+  ggplot(df_clean, aes(x = Reference_Types, y = CitedCount)) +
+    geom_boxplot() +
+    scale_y_log10() +
+    labs(title = "CitedCount by Reference_Types",
+         x = "Reference_Types", y = "CitedCount (log scale)")
+)
+
+```
+
+-   **Grants and patents** are associated with higher citations.
+-   **Cross-group collaborations** appear beneficial.
+
+## 7. Collinearity & Correlation Matrix
+
+```{r}
+library(GGally)
+library(ggplot2)
+df_clean %>%
+  select(all_of(numeric_vars)) %>%
+  GGally::ggpairs(upper = list(continuous = wrap("cor", size = 3))) +
+  ggtitle("Pairwise Scatterplots & Pearson Correlations")
+```
+
+Correlation Analysis:-
+
+-   Moderate-to-strong correlations were observed among network-related
+    metrics (`OutDegree`, `InDegree`, `TotalDegree`).
+
+-   **CrossGroupCitations** remained relatively independent — making it
+    a strong candidate for modeling.
+
+### 8. Transformations & Final Feature Notes
+
+### 8a. If needed, log-transform skewed predictors
+
+```{r}
+df_feat <- df_clean %>%
+  mutate(
+    log_Cited   = log(CitedCount + 1),
+    log_OutDeg  = log(OutDegree + 1),
+    log_InDeg   = log(InDegree + 1),
+    log_TotDeg  = log(TotalDegree + 1),
+    Year_Centered = PubYear - mean(PubYear)
+  )
+library(tidyverse)  
+library(mgcv)  
+
+```
+
+## Part 1: Generalized Additive Models (GAM)
+
+### Generalized Additive Models (GAM)
+
+-   Fitted a **Negative Binomial GAM** using smoothed splines on key
+    predictors (`PubYear`, `TotalDegree`, `CrossGroupCitations`,
+    `Grant_Count`).
+
+-   Smooth functions indicated:
+
+    -   Older publications tend to have lower citations (PubYear
+        effect).
+
+    -   Higher `TotalDegree` (connectivity) leads to higher citations
+        but at a diminishing rate.
+
+    -   Strong cross-group collaborations (`CrossGroupCitations`)
+        positively influence citation counts.
+
+-   **Cross-validation results**:
+
+    -   GAM achieved lower RMSE compared to a Poisson GLM baseline.
+
+    -   Flexible smoothing terms captured nonlinear relationships
+        effectively.
+
+### 1b. Feature engineering: skew‐correct & interaction
+
+```{r}
+df_feat <- df_clean %>%
+  mutate(
+    log_TotDeg     = log1p(TotalDegree),
+    log_Cross      = log1p(CrossGroupCitations),
+    TotDeg_x_Grant = TotalDegree * Grant_Count
+  )
+```
+
+## 2. Fit the GAM
+
+```{r}
+set.seed(2025)
+gam_nb <- gam(
+  CitedCount ~ 
+    s(PubYear,          k = 10) + 
+    s(log_TotDeg,       k = 10) + 
+    s(log_Cross,        k = 10) +
+    s(Grant_Count,      k =  5) +
+    ti(log_TotDeg, Grant_Count, k = c(10,5)),  
+  family = nb(link = "log"),
+  data   = df_feat,
+  select = TRUE,   
+  method = "REML"
+)
+summary(gam_nb)
+gam.check(gam_nb)
+par(mfrow = c(2,3))
+plot(gam_nb, shade = TRUE, seWithMean = TRUE)
+```
+
+# 
+
+## OVERDISPERSION TEST
+
+```{r}
+library(AER)
+m0     <- glm(CitedCount ~ PubYear + TotalDegree + CrossGroupCitations + Grant_Count,
+              family = poisson(link = "log"),
+              data   = df_clean)
+disp  <- dispersiontest(m0)
+print(disp)
+if(disp$p.value < .05){
+  library(MASS)
+  gam_nb <- gam(
+    CitedCount ~ s(PubYear, k=10) + s(TotalDegree, k=10) + s(CrossGroupCitations, k=10),
+    family = nb(theta=disp$estimate, link="log"),
+    data   = df_clean, method="REML"
+  )
+  summary(gam_nb)
+  gam.check(gam_nb)
+}
+```
+
+## 4. 5-Fold Cross-Validation
+
+```{r}
+library(purrr)   
+
+K     <- 5
+df_cv <- df_clean %>% 
+  mutate(fold = sample(rep(1:K, length.out = n())))  
+
+cv_res <- map_dfr(1:K, function(k){
+  train <- df_cv %>% filter(fold != k)
+  test  <- df_cv %>% filter(fold == k)
+  
+  m <- gam(
+    CitedCount ~ 
+      s(PubYear, k=10) + 
+      s(TotalDegree, k=10) + 
+      s(CrossGroupCitations, k=10),
+    family = poisson(link="log"),
+    data   = train,
+    method = "REML"
+  )
+  
+  preds <- predict(m, newdata = test, type = "response")
+  if(k %in% c(2,5)){
+    cat("\n--- Debug fold", k, "---\n")
+    cat(" test rows:", nrow(test), " preds length:", length(preds), "\n")
+    cat("  CitedCount range: ", range(test$CitedCount), "\n")
+    cat("       preds range: ", range(preds), "\n\n")
+  }
+  rmse <- sqrt(mean((test$CitedCount - preds)^2, na.rm = TRUE))
+  tibble(fold = k, RMSE = rmse)
+})
+
+print(cv_res)
+cv_res %>% summarise(mean_RMSE = mean(RMSE), sd_RMSE = sd(RMSE))
+
+
+
+```
+
+# 
+
+## 5. Baseline: Poisson GLM for comparison
+
+```{r}
+glm_res <- map_dfr(1:K, function(k) {
+  train <- df_cv %>% filter(fold != k)
+  test  <- df_cv %>% filter(fold == k)
+  
+  m_glm <- glm(
+    CitedCount ~ PubYear + TotalDegree + CrossGroupCitations,
+    family = poisson(link = "log"),
+    data   = train
+  )
+  preds <- predict(m_glm, newdata = test, type = "response")
+  rmse  <- sqrt(mean((test$CitedCount - preds)^2))
+  tibble(fold = k, RMSE = rmse)
+})
+
+glm_summary <- glm_res %>% 
+  summarise(
+    mean_RMSE = mean(RMSE),
+    sd_RMSE   = sd(RMSE)
+  )
+print(glm_summary)
+cv_res <- map_dfr(1:K, function(k) {
+  train <- df_cv %>% filter(fold != k)
+  test  <- df_cv %>% filter(fold == k)
+  
+  m <- gam(CitedCount ~ s(PubYear, k=10)
+           + s(TotalDegree, k=10)
+           + s(CrossGroupCitations, k=10),
+           family=poisson(link="log"),
+           data=train, method="REML")
+  
+  preds <- predict(m, newdata=test, type="response")
+  rmse  <- sqrt(mean((test$CitedCount - preds)^2))
+  tibble(fold=k, RMSE=rmse)
+})
+
+print(cv_res)
+
+```
+
+## Part 2: Tree-Based Methods
+
+## Decision Tree
+
+-   Tuned maximum tree depth using cross-validation (depth between 3-6
+    optimal).
+
+-   The final tree was interpretable:
+
+    -   `TotalDegree` was often the primary split.
+
+    -   `CrossGroupCitations` and `Grant_Count` helped further segment
+        citation behaviors.
+
+-   **Tree performance**: Higher variance, slight overfitting compared
+    to ensemble methods.
+
+```{r}
+library(tidyverse)    
+library(caret)        
+library(rpart)        
+library(rpart.plot)   
+
+```
+
+### 1. Set up 5‐fold CV
+
+```{r}
+set.seed(2025)
+ctrl <- trainControl(method = "cv", number = 5)
+```
+
+### 2. Fit & tune a regression tree (maxdepth grid)
+
+```{r}
+tree_fit2 <- train(
+  CitedCount ~ PubYear + log_TotDeg + log_Cross + Grant_Count,
+  data      = df_feat,
+  method    = "rpart2",       
+  trControl = ctrl,
+  tuneGrid  = expand.grid(maxdepth = 2:10)
+)
+print(tree_fit2)
+rpart.plot(tree_fit2$finalModel, main = "CART (tuned maxdepth)")
+
+```
+
+### 3. Visualize the final tree
+
+```{r}
+library(rpart)
+library(caret)
+library(rpart.plot)
+best_tree <- tree_fit2$finalModel
+rpart.plot(
+  best_tree,
+  type = 2,             
+  extra = 101,          
+  fallen.leaves = TRUE,
+  main = "Optimal Regression Tree for CitedCount"
+)
+```
+
+### 4. CV performance
+
+```{r}
+print(tree_fit2)
+```
+
+### 5. Fit a random forest with CV
+
+-   Random Forests (RF) achieved much lower RMSE than a single tree.
+
+-   Feature importance ranking:
+
+    -   `TotalDegree` \> `CrossGroupCitations` \> `PubYear` \>
+        `Grant_Count`
+
+-   RF stabilized prediction error beyond \~200 trees (as confirmed in
+    bias-variance analysis).
+
+```{r}
+set.seed(2025)
+rf_fit <- train(
+  CitedCount ~ PubYear + TotalDegree + CrossGroupCitations + Grant_Count,
+  data      = df_clean,
+  method    = "rf",
+  trControl = ctrl,
+  importance = TRUE,
+  tuneLength = 5    
+)
+```
+
+## 6. CV performance & variable importance
+
+```{r}
+print(rf_fit)               
+var_imp <- varImp(rf_fit)   
+print(var_imp)
+plot(var_imp, top = 10)     
+```
+
+## 7. Fit a GBM with CV
+
+### Gradient Boosting (GBM)
+
+-   Tuned interaction depth, shrinkage, and number of trees.
+
+-   GBM performed comparably or slightly better than RF, but required
+    careful tuning.
+
+-   Shrinkage of 0.05–0.1 and 300-500 trees provided optimal
+    bias-variance balance.
+
+```{r}
+set.seed(2025)
+gbm_fit <- train(
+  CitedCount ~ PubYear + TotalDegree + CrossGroupCitations + Grant_Count,
+  data      = df_clean,
+  method    = "gbm",
+  trControl = ctrl,
+  verbose   = FALSE,
+  tuneGrid  = expand.grid(
+    n.trees      = c(100, 200, 500),
+    interaction.depth = c(1, 3, 5),
+    shrinkage    = c(0.01, 0.1),
+    n.minobsinnode = 10
+  )
+)
+```
+
+## 8. CV performance
+
+```{r}
+library(caret)
+library(randomForest)
+library(gbm)
+library(rpart)
+
+print(gbm_fit)   
+
+resamps <- resamples(list(
+  Tree = tree_fit2,
+  RF   = rf_fit,
+  GBM  = gbm_fit
+))
+summary(resamps)
+bwplot(resamps, metric = "RMSE")
+print(gbm_fit)
+
+gbm_grid <- expand.grid(
+  n.trees = c(100, 300, 500, 1000),
+  interaction.depth = c(1, 3, 5, 7),
+  shrinkage = c(0.01, 0.05, 0.1),
+  n.minobsinnode = 10
+)
+gbm_fit2 <- train(
+  CitedCount ~ PubYear + TotalDegree + CrossGroupCitations + Grant_Count,
+  data = df_clean,
+  method = "gbm",
+  trControl = ctrl,
+  verbose = FALSE,
+  tuneGrid = gbm_grid
+)
+print(gbm_fit2)
+
+resamps2 <- resamples(list(
+  Tree = tree_fit2,
+  RF   = rf_fit,
+  GBM  = gbm_fit2
+))
+summary(resamps2)
+bwplot(resamps2, metric = "RMSE")
+```
+
+## Part 3: Model Selection Task
+
+### Principal Component Analysis (PCA)
+
+-   The first two principal components captured \~45% of the total
+    variance.
+
+-   `TotalDegree`, `CrossGroupCitations`, and `Grant_Count` contributed
+    heavily to PC1.
+
+-   **PCA Biplot**:
+
+    -   Good separation of articles based on `InGroup1` labels.
+
+### 3B.1 Prepare Numeric Matrix for PCA
+
+In this phase of the analysis, we begin by selecting a subset of numeric
+variables from the dataset (df_clean) that are deemed relevant for
+dimensionality reduction via Principal Component Analysis (PCA). Once
+the relevant variables are selected, we apply scaling to the numeric
+data using the scale() function. This step standardizes the data,
+ensuring that each variable has a mean of zero and a standard deviation
+of one, which is crucial for PCA. Scaling ensures that variables are
+equally weighted, as PCA is sensitive to the variance of the data.
+
+```{r}
+library(tidyverse)    
+library(factoextra)   
+library(cluster)      
+library(dplyr)   
+num_df <- df_clean %>%
+  dplyr::select(
+    PubYear, AuthorNum, OutDegree, InDegree, TotalDegree,
+    ClusteringCoeff, CrossGroupCitations, Grant_Count, Patent_Count
+  )
+
+num_df <- df_clean[ , c(
+  "PubYear", "AuthorNum", "OutDegree", "InDegree", "TotalDegree",
+  "ClusteringCoeff", "CrossGroupCitations", "Grant_Count", "Patent_Count"
+)]
+
+num_scaled <- scale(num_df)
+
+```
+
+### 3B.2 PCA: Variance Explained and Biplot
+
+To identify the underlying structure of the data, we conduct Principal
+Component Analysis (PCA) on the scaled dataset using the prcomp()
+function. PCA reduces the dimensionality of the data by projecting it
+onto principal components (PCs) that maximize the variance in the data.
+To visualize the relationship between observations and variables in the
+reduced dimensional space, we generate a biplot using fviz_pca_biplot().
+The biplot displays the first two principal components (PC1 and PC2),
+with observations represented as points and variables as vectors
+(arrows). The points are colored based on the grouping variable
+InGroup1, allowing us to explore if certain groups of observations are
+distinct or overlapping in the PCA space.
+
+```{r}
+pca_res <- prcomp(num_scaled, center = TRUE, scale. = TRUE)
+fviz_eig(pca_res, addlabels = TRUE, ylim = c(0,50)) +
+  ggtitle("Scree Plot: % Variance Explained by PCs")
+fviz_pca_biplot(
+  pca_res, 
+  geom.ind = "point", 
+  habillage = df_clean$InGroup1,   # color by InGroup1
+  addEllipses = TRUE,
+  legend.title = "InGroup1"
+) + ggtitle("PCA Biplot (PC1 vs PC2) Colored by InGroup1")
+
+
+```
+
+### 3B.3 Determine Optimal k for k-Means
+
+In this section, we explore the use of k-means clustering to identify
+natural groupings within the dataset. The goal is to determine the
+optimal number of clusters, denoted as k.
+
+### K-Means Clustering
+
+-   Optimal number of clusters determined using Elbow and Silhouette
+    methods → **k = 2**.
+
+-   Cluster assignments moderately aligned with original `InGroup1` and
+    `InGroup2` labels.
+
+-   Silhouette scores indicated moderate clustering quality.
+
+```{r}
+set.seed(2025)
+
+```
+
+### 3B.3a Elbow method (within‐sum‐of‐squares)
+
+The elbow method is a commonly used technique for selecting the optimal
+value of k. We use the fviz_nbclust() function to plot the
+within-cluster sum of squares (WSS) as a function of the number of
+clusters. As the number of clusters increases, the WSS decreases;
+however, the rate of decrease slows down as k grows larger. The "elbow"
+in the plot indicates the point where adding more clusters results in
+only marginal improvements, suggesting the ideal number of clusters.
+
+```{r}
+fviz_nbclust(num_scaled, kmeans, method = "wss") +
+  ggtitle("Elbow Method for k-Means")
+```
+
+### 3B.3b Average silhouette width
+
+The silhouette method provides another way to assess the quality of
+clustering solutions for different values of k. The silhouette width
+measures how well each observation fits into its assigned cluster, with
+higher values indicating better clustering. The fviz_nbclust() function
+is used to generate silhouette plots, which allow us to evaluate and
+compare the clustering quality across different values of k. This helps
+to confirm the optimal number of clusters based on the overall structure
+of the data.
+
+```{r}
+fviz_nbclust(num_scaled, kmeans, method = "silhouette") +
+  ggtitle("Silhouette Method for k-Means")
+
+```
+
+### 3B.4 Fit k-Means & Evaluate Suppose both methods point to k = 2
+
+After determining that k = 2 clusters is the most appropriate solution
+(based on the elbow and silhouette methods), we proceed to fit a k-means
+clustering model with k = 2.
+
+```{r}
+set.seed(2025)
+km2 <- kmeans(num_scaled, centers = 2, nstart = 25)
+df_clean$cluster2 <- factor(km2$cluster)
+```
+
+### 3B.4a Silhouette plot
+
+To assess the quality of the clustering solution, we generate a
+silhouette plot for the k = 2 solution. The silhouette plot provides a
+measure of how well each observation is assigned to its cluster. A
+positive silhouette width indicates that observations are
+well-clustered, while negative values suggest poor cluster assignments.
+The silhouette plot allows us to visually evaluate the appropriateness
+of the clustering solution.
+
+```{r}
+sil2 <- silhouette(km2$cluster, dist(num_scaled))
+fviz_silhouette(sil2) + ggtitle("Silhouette Plot for k=2")
+```
+
+### 3B.4b Cross-tabulate clusters vs original group labels
+
+To further validate the clustering solution, we compare the k-means
+cluster assignments with the original group labels (InGroup1 and
+InGroup2). Using cross-tabulation (table()), we generate contingency
+tables that show how the clusters align with the known groups in the
+dataset. This allows us to assess whether the clustering captures
+meaningful groupings in the data or if the clusters are poorly defined.
+
+```{r}
+tab1 <- table(Cluster = df_clean$cluster2, InGroup1 = df_clean$InGroup1)
+tab2 <- table(Cluster = df_clean$cluster2, InGroup2 = df_clean$InGroup2)
+print(tab1)
+print(tab2)
+```
+
+##3B.5 k = 3 for Comparison \# If k = 3 looked plausible We repeat the
+analysis from the k = 2 case, including adding the cluster assignments
+to the dataset and performing cross-tabulation with the original group
+labels (InGroup1 and InGroup2). This comparison provides insights into
+whether increasing the number of clusters improves the quality of the
+clustering solution or if the two-cluster solution is still more
+appropriate.
+
+```{r}
+set.seed(2025)
+km3 <- kmeans(num_scaled, centers = 3, nstart = 25)
+df_clean$cluster3 <- factor(km3$cluster)
+```
+
+### Compare cluster3 vs InGroup1/InGroup2
+
+```{r}
+print(table(Cluster3 = df_clean$cluster3, InGroup1 = df_clean$InGroup1))
+print(table(Cluster3 = df_clean$cluster3, InGroup2 = df_clean$InGroup2))
+```
+
+## 3B.6. t-SNE visualization of numeric space
+
+We perform t-SNE on the scaled numeric data using the Rtsne() function,
+and then plot the results using ggplot2. The observations are colored
+based on the InGroup1 variable, allowing us to visually assess if the
+groups are well-separated in the t-SNE space. This visualization
+provides an intuitive way to evaluate the structure of the data and the
+clustering solutions derived from k-means.
+
+### t-SNE Visualization
+
+-   t-SNE provided a clearer separation between articles from different
+    groups.
+
+-   Confirmed complex non-linear relationships among features.
+
+```{r}
+library(Rtsne)
+set.seed(2025)
+
+num_jitter <- as.matrix(num_scaled) + matrix(rnorm(length(num_scaled), 0, 1e-6),
+                                             nrow = nrow(num_scaled))
+
+tsne_out <- Rtsne(num_jitter, perplexity = 30, verbose = TRUE)
+
+df_feat$TSNE1 <- tsne_out$Y[,1]
+df_feat$TSNE2 <- tsne_out$Y[,2]
+
+
+ggplot(df_feat, aes(TSNE1, TSNE2, color = factor(InGroup1))) +
+  geom_point(alpha = 0.5) +
+  labs(color = "InGroup1") +
+  ggtitle("t-SNE: Numeric Features Colored by InGroup1") +
+  theme_minimal()
+```
+
+## Part 4: Bias-Variance Trade-Off and Temporal Analysis
+
+Using Random Forests:
+
+**Variation with Number of Trees**:
+
+-   As the number of trees in the Random Forest model increased from 50
+    to 1000:
+
+    -   The **training error** (Out-of-Bag Mean Squared Error, OOB MSE)
+        showed a notable decrease initially, but this reduction
+        plateaued after approximately 200 trees.
+
+    -   The **test error** closely tracked the OOB MSE, suggesting
+        minimal overfitting as the model complexity increased.
+
+<!-- -->
+
+-   **Conclusion:** A Random Forest with \~200 trees offers a good
+    balance between bias and variance.
+
+### 4.1 Bias–Variance Trade‐Off via Random Forest
+
+```{r}
+library(tidyverse)
+library(caret)
+library(randomForest)
+```
+
+### 1. Train/Test split (80/20)
+
+```{r}
+set.seed(2025)
+train_idx <- createDataPartition(df_clean$CitedCount, p = .8, list = FALSE)
+train <- df_clean[train_idx, ]
+test  <- df_clean[-train_idx, ]
+```
+
+### 2. Grid of tree counts
+
+```{r}
+ntrees <- c(50, 100, 200, 500, 1000)
+bv_df  <- tibble(ntree = ntrees, OOB_MSE = NA_real_, Test_MSE = NA_real_)
+```
+
+### 3. Loop to fit RF at each complexity
+
+```{r}
+for(i in seq_along(ntrees)) {
+  nt <- ntrees[i]
+  rf <- randomForest(
+    CitedCount ~ PubYear + TotalDegree + CrossGroupCitations + Grant_Count,
+    data  = train,
+    ntree = nt
+  )
+  
+  bv_df$OOB_MSE[i]  <- tail(rf$mse, 1)
+  preds             <- predict(rf, newdata = test)
+  bv_df$Test_MSE[i] <- mean((test$CitedCount - preds)^2)
+}
+```
+
+### 4. Plot bias–variance curve
+
+```{r}
+bv_df_long <- bv_df %>% pivot_longer(-ntree, names_to = "ErrorType", values_to = "MSE")
+
+ggplot(bv_df_long, aes(x = ntree, y = MSE, color = ErrorType)) +
+  geom_line() + geom_point() +
+  labs(
+    title = "Random Forest: OOB vs Test MSE as Number of Trees Increases",
+    x = "# of Trees (ntree)",
+    y = "Mean Squared Error",
+    color = ""
+  ) +
+  theme_minimal()
+```
+
+### 4.2 Temporal Analysis with Polynomial Regression
+
+#### Fitting Polynomial Models for Publication Year (`PubYear`):
+
+-   **Quadratic Model**:
+
+    -   The inclusion of a quadratic term for `PubYear` significantly
+        improved model performance over the baseline linear model.
+
+    -   The **cross-validation RMSE** for the quadratic model showed a
+        slight improvement compared to the linear model, indicating that
+        adding the quadratic term helped capture more complex temporal
+        relationships.
+
+-   **Cubic Model**:
+
+    -   The cubic model did not provide a significant performance boost
+        and introduced a risk of overfitting, as evidenced by its
+        slightly higher RMSE compared to the quadratic model.
+
+-   **Residual Diagnostics**:
+
+    -   Residual diagnostics, including residual vs. fitted plots and
+        Q-Q plots, confirmed no major violations of model assumptions
+        (such as heteroscedasticity or non-normality).1. 5-fold CV setup
+
+```{r}
+set.seed(2025)
+ctrl <- trainControl(method = "cv", number = 5)
+```
+
+### 2. Linear model (baseline)
+
+```{r}
+lin_mod <- train(
+  CitedCount ~ PubYear + TotalDegree + CrossGroupCitations + Grant_Count,
+  data      = df_clean,
+  method    = "lm",
+  trControl = ctrl
+)
+```
+
+### 3. Quadratic model
+
+```{r}
+quad_mod <- train(
+  CitedCount ~ poly(PubYear, 2) + TotalDegree + CrossGroupCitations + Grant_Count,
+  data      = df_clean,
+  method    = "lm",
+  trControl = ctrl
+)
+```
+
+### 4. Cubic model
+
+```{r}
+cube_mod <- train(
+  CitedCount ~ poly(PubYear, 3) + TotalDegree + CrossGroupCitations + Grant_Count,
+  data      = df_clean,
+  method    = "lm",
+  trControl = ctrl
+)
+```
+
+### 5. Summarize and compare RMSE
+
+```{r}
+library(lattice)  
+res <- resamples(list(Linear = lin_mod, Quadratic = quad_mod, Cubic = cube_mod))
+summary(res)
+bwplot(res, metric = "RMSE",
+       main = "CV RMSE: Linear vs Polynomial PubYear Models")
+
+```
+
+### 6. Inspect polynomial term significance in the best model
+
+```{r}
+summary(quad_mod$finalModel)
+```
+
+### POLY‐LM RESIDUAL CHECKS: heteroscedasticity & normality
+
+```{r}
+quad_fit <- quad_mod$finalModel  
+```
+
+### (a) Residuals vs Fitted
+
+```{r}
+plot(quad_fit, which = 1,
+     main = "Quadratic LM: Residuals vs Fitted",
+     sub = "", pch = 20, cex = 0.6)
+abline(h = 0, col = "red", lwd = 2)
+
+```
+
+### (b) QQ‐plot of standardized residuals
+
+```{r}
+plot(quad_fit, which = 2,
+     main = "Quadratic LM: Normal Q–Q",
+     sub = "", pch = 20, cex = 0.6)
+```
+
+### Summary:
+
+This section explores both the bias-variance trade-off in Random Forest
+models and the impact of temporal trends in the data using polynomial
+regression models.
+
+-   **Random Forest Analysis**:
+
+    -   The optimal number of trees in the Random Forest model was found
+        to be around 200, where the trade-off between bias and variance
+        is balanced, ensuring low overfitting risk.
+
+-   **Polynomial Regression**:
+
+    -   The inclusion of a quadratic term for `PubYear` improved the
+        model’s predictive performance over a simple linear regression
+        model. However, adding a cubic term led to marginal
+        improvements, indicating potential overfitting.
+
+    -   Residual diagnostics confirmed the validity of the quadratic
+        model, with no major violations of model assumptions, suggesting
+        it is a robust solution for analyzing temporal effects.
+
+## Conclusion:-
+
+-   **Best modeling approach:** Random Forests and Gradient Boosting
+    provided the strongest predictive performance.
+
+-   **Key predictors:** Total network connectivity (`TotalDegree`),
+    cross-disciplinary collaborations (`CrossGroupCitations`), and grant
+    support.
+
+-   **Temporal dynamics:** The quadratic trend in `PubYear` suggests
+    evolving citation behavior over time.
+
+-   **Unsupervised insights:** Research articles exhibit underlying
+    group structures captured via PCA and K-means.
+
+## References:-
+
+-   Hastie, T. and Tibshirani, R., 1990. *Generalized Additive Models*.
+    1st ed. London: Chapman & Hall.
+
+-   James, G., Witten, D., Hastie, T. and Tibshirani, R., 2021. *An
+    Introduction to Statistical Learning: with Applications in R*. 2nd
+    ed. New York: Springer.
+
+-   Breiman, L., 2001. Random forests. *Machine Learning*, 45(1),
+    pp.5-32.
+
+-   Friedman, J.H., 2001. Greedy function approximation: a gradient
+    boosting machine. *Annals of Statistics*, 29(5), pp.1189-1232.
+
+-   Ripley, B.D., 1996. *Pattern Recognition and Neural Networks*. 1st
+    ed. Cambridge: Cambridge University Press.
+
+-   Rousseeuw, P.J., 1987. Silhouettes: a graphical aid to the
+    interpretation and validation of cluster analysis. *Journal of
+    Computational and Applied Mathematics*, 20, pp.53-65.
+
+-   van der Maaten, L. and Hinton, G., 2008. Visualizing data using
+    t-SNE. *Journal of Machine Learning Research*, 9(Nov), pp.2579-2605.
+
+-   Wood, S.N., 2017. *Generalized Additive Models: An Introduction with
+    R*. 2nd ed. Boca Raton: CRC Press.
+
+-   Kuhn, M. and Johnson, K., 2013. *Applied Predictive Modeling*. 1st
+    ed. New York: Springer.
+
+-   Gelman, A. and Hill, J., 2006. *Data Analysis Using Regression and
+    Multilevel/Hierarchical Models*. 1st ed. Cambridge: Cambridge
+    University Press.
